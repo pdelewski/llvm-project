@@ -31,6 +31,9 @@
 #ifndef MLIR_IR_IRMUTATIONOBSERVER_H
 #define MLIR_IR_IRMUTATIONOBSERVER_H
 
+#include "mlir/IR/Value.h"
+#include "llvm/ADT/ArrayRef.h"
+
 #include <atomic>
 
 namespace mlir {
@@ -54,6 +57,16 @@ public:
   /// within one block — the moveOpUpInBlock case no listener sees today.
   virtual void notifyOperationMoved(Operation *op, Block *to, Block *from,
                                     bool sameBlock) {}
+
+  /// The dialect-conversion driver is committing its replacement of `op`:
+  /// `replacements` holds the final value standing in for each of `op`'s
+  /// results (null where a result was dropped). Fired from
+  /// ReplaceOperationRewrite::commit, at the one moment both sides of the
+  /// pairing exist — conversion defers RAUW to finalization, so no other
+  /// observation point ever sees this map. `op` is still linked when this
+  /// fires; it is unlinked immediately after and erased during cleanup.
+  virtual void notifyConversionReplaced(Operation *op,
+                                        ArrayRef<Value> replacements) {}
 
 protected:
   IRMutationObserver() = default;

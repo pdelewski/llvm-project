@@ -12,6 +12,7 @@
 #include "mlir/IR/Builders.h"
 #include "mlir/IR/BuiltinOps.h"
 #include "mlir/IR/Dominance.h"
+#include "mlir/IR/IRMutationObserver.h"
 #include "mlir/IR/IRMapping.h"
 #include "mlir/IR/Iterators.h"
 #include "mlir/IR/Operation.h"
@@ -1287,6 +1288,11 @@ void ReplaceOperationRewrite::commit(RewriterBase &rewriter) {
   // Notify the listener that the operation is about to be replaced.
   if (listener)
     listener->notifyOperationReplaced(op, replacements);
+
+  // mlir-obs: the commit is the only moment both sides of the pairing exist
+  // (RAUW was deferred until now); expose the driver's own replacement map.
+  if (auto *obs = getActiveIRMutationObserver())
+    obs->notifyConversionReplaced(op, replacements);
 
   // Replace all uses with the new values.
   for (auto [result, newValue] :
