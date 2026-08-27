@@ -12,6 +12,7 @@
 #include "mlir/IR/BuiltinTypes.h"
 #include "mlir/IR/Dialect.h"
 #include "mlir/IR/IRMapping.h"
+#include "mlir/IR/IRMutationObserver.h"
 #include "mlir/IR/Matchers.h"
 #include "mlir/IR/OpImplementation.h"
 #include "mlir/IR/OperationSupport.h"
@@ -489,6 +490,16 @@ Block *llvm::ilist_traits<::mlir::Operation>::getContainingBlock() {
   return reinterpret_cast<Block *>(reinterpret_cast<char *>(anchor) - offset);
 }
 
+// mlir-obs phase-1 storage: the process-global observer slot declared in
+// IRMutationObserver.h. Defined here so the patch stays within the two files
+// that already know about op-list mutation.
+std::atomic<mlir::IRMutationObserver *> mlir::detail::activeIRMutationObserver{
+    nullptr};
+
+void mlir::setActiveIRMutationObserver(IRMutationObserver *observer) {
+  detail::activeIRMutationObserver.store(observer, std::memory_order_relaxed);
+}
+
 /// This is a trait method invoked when an operation is added to a block.  We
 /// keep the block pointer up to date.
 void llvm::ilist_traits<::mlir::Operation>::addNodeToList(Operation *op) {
@@ -497,6 +508,9 @@ void llvm::ilist_traits<::mlir::Operation>::addNodeToList(Operation *op) {
 
   // Invalidate the order on the operation.
   op->orderIndex = Operation::kInvalidOrderIdx;
+
+  if (auto *obs = mlir::getActiveIRMutationObserver())
+    obs->notifyOperationAttached(op);
 }
 
 /// This is a trait method invoked when an operation is removed from a block.
@@ -504,6 +518,9 @@ void llvm::ilist_traits<::mlir::Operation>::addNodeToList(Operation *op) {
 void llvm::ilist_traits<::mlir::Operation>::removeNodeFromList(Operation *op) {
   assert(op->block && "not already in an operation block!");
   op->block = nullptr;
+
+  if (auto *obs = mlir::getActiveIRMutationObserver())
+    obs->notifyOperationDetached(op);
 }
 
 /// This is a trait method invoked when an operation is moved from one block
@@ -517,12 +534,28 @@ void llvm::ilist_traits<::mlir::Operation>::transferNodesFromList(
 
   // If we are transferring operations within the same block, the block
   // pointer doesn't need to be updated.
-  if (curParent == otherList.getContainingBlock())
+  if (curParent == otherList.getContainingBlock()) {
+    // A same-block splice is a reorder — the moveOpUpInBlock case that
+    // dispatches no action and notifies no rewriter listener. The range walk
+    // happens only with an observer installed; the early return below is
+    // otherwise unchanged.
+    if (auto *obs = mlir::getActiveIRMutationObserver())
+      for (op_iterator it = first; it != last; ++it)
+        obs->notifyOperationMoved(&*it, curParent, curParent,
+                                  /*sameBlock=*/true);
     return;
+  }
+
+  Block *oldParent = otherList.getContainingBlock();
+  auto *obs = mlir::getActiveIRMutationObserver();
 
   // Update the 'block' member of each operation.
-  for (; first != last; ++first)
+  for (; first != last; ++first) {
     first->block = curParent;
+    if (obs)
+      obs->notifyOperationMoved(&*first, curParent, oldParent,
+                                /*sameBlock=*/false);
+  }
 }
 
 /// Remove this operation (and its descendants) from its Block and delete
