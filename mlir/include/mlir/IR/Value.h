@@ -18,16 +18,28 @@
 #include "mlir/Support/LLVM.h"
 #include "llvm/Support/PointerLikeTypeTraits.h"
 
+#include <atomic>
+
 namespace mlir {
 class AsmState;
 class Block;
 class BlockArgument;
 class Operation;
 class OpOperand;
+class IRMutationObserver;
 class OpPrintingFlags;
 class OpResult;
 class Region;
 class Value;
+
+namespace detail {
+/// mlir-obs phase-2: duplicate declaration of the process-global mutation
+/// observer slot owned by IRMutationObserver.h, which cannot be included
+/// here (it requires the complete Value type). The single definition lives
+/// in Operation.cpp; this declaration only feeds the inline fast-path
+/// guards below.
+extern std::atomic<IRMutationObserver *> activeIRMutationObserver;
+} // namespace detail
 
 //===----------------------------------------------------------------------===//
 // Value
@@ -113,7 +125,16 @@ public:
   /// completely invalid IR very easily.  It is strongly recommended that you
   /// recreate IR objects with the right types instead of mutating them in
   /// place.
-  void setType(Type newType) { impl->setType(newType); }
+  void setType(Type newType) {
+    if (detail::activeIRMutationObserver.load(std::memory_order_relaxed))
+      return setTypeNotifying(newType);
+    impl->setType(newType);
+  }
+
+  /// Out-of-line slow path of setType: applies the mutation, then notifies
+  /// the active IRMutationObserver. Defined in Value.cpp where the observer
+  /// type is complete.
+  void setTypeNotifying(Type newType);
 
   /// If this value is the result of an operation, return the operation that
   /// defines it.
@@ -261,8 +282,31 @@ public:
   /// Return which operand this is in the OpOperand list of the Operation.
   unsigned getOperandNumber() const;
 
+  /// Set the current value being used by this operand. Shadows
+  /// IROperand::set so the active IRMutationObserver (if any) sees the
+  /// rewire — every typed use of an OpOperand resolves here, including the
+  /// per-use updates of a replaceAllUsesWith loop.
+  void set(Value newValue) {
+    if (detail::activeIRMutationObserver.load(std::memory_order_relaxed))
+      return setNotifying(newValue);
+    IROperand<OpOperand, Value>::set(newValue);
+  }
+
+  /// Remove this use of the operand (the dropAllUses teardown path),
+  /// notifying the observer with a null new value.
+  void drop() {
+    if (detail::activeIRMutationObserver.load(std::memory_order_relaxed))
+      return dropNotifying();
+    IROperand<OpOperand, Value>::drop();
+  }
+
   /// Set the current value being used by this operand.
   void assign(Value value) { set(value); }
+
+  /// Out-of-line slow paths: apply the mutation, then notify the active
+  /// IRMutationObserver. Defined in Value.cpp.
+  void setNotifying(Value newValue);
+  void dropNotifying();
 
 private:
   /// Keep the constructor private and accessible to the OperandStorage class

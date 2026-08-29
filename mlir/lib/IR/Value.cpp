@@ -8,6 +8,7 @@
 
 #include "mlir/IR/Value.h"
 #include "mlir/IR/Block.h"
+#include "mlir/IR/IRMutationObserver.h"
 #include "mlir/IR/Operation.h"
 
 using namespace mlir;
@@ -225,4 +226,29 @@ unsigned BlockOperand::getOperandNumber() const {
 /// Return which operand this is in the operand list.
 unsigned OpOperand::getOperandNumber() const {
   return this - &getOwner()->getOpOperands()[0];
+}
+
+//===----------------------------------------------------------------------===//
+// IRMutationObserver slow paths (mlir-obs phase-2)
+//===----------------------------------------------------------------------===//
+
+void Value::setTypeNotifying(Type newType) {
+  Type oldType = getType();
+  impl->setType(newType);
+  if (IRMutationObserver *obs = getActiveIRMutationObserver())
+    obs->notifyValueTypeChanged(*this, oldType);
+}
+
+void OpOperand::setNotifying(Value newValue) {
+  Value oldValue = get();
+  IROperand<OpOperand, Value>::set(newValue);
+  if (IRMutationObserver *obs = getActiveIRMutationObserver())
+    obs->notifyOperandChanged(*this, oldValue, newValue);
+}
+
+void OpOperand::dropNotifying() {
+  Value oldValue = get();
+  IROperand<OpOperand, Value>::drop();
+  if (IRMutationObserver *obs = getActiveIRMutationObserver())
+    obs->notifyOperandChanged(*this, oldValue, Value());
 }

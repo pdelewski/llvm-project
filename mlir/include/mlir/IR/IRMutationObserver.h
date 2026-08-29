@@ -68,6 +68,20 @@ public:
   virtual void notifyConversionReplaced(Operation *op,
                                         ArrayRef<Value> replacements) {}
 
+  /// `operand` of its owner op was rewired from `oldValue` to `newValue`
+  /// (already applied when this fires). Every operand mutation funnels
+  /// through OpOperand::set — setOperand calls, rewriter modifications, and
+  /// each use updated by a replaceAllUsesWith loop. A null `newValue` marks
+  /// the drop that precedes bulk teardown (dropAllUses). Not covered:
+  /// operand-list resizes (insert/eraseOperands), which change arity rather
+  /// than rewire an existing use.
+  virtual void notifyOperandChanged(OpOperand &operand, Value oldValue,
+                                    Value newValue) {}
+
+  /// `value`'s type was mutated in place, from `oldType` (already applied).
+  /// Value::setType is the single funnel for in-place retyping.
+  virtual void notifyValueTypeChanged(Value value, Type oldType) {}
+
 protected:
   IRMutationObserver() = default;
 };
