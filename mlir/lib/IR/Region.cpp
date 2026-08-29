@@ -8,6 +8,7 @@
 
 #include "mlir/IR/Region.h"
 #include "mlir/IR/IRMapping.h"
+#include "mlir/IR/IRMutationObserver.h"
 #include "mlir/IR/Operation.h"
 using namespace mlir;
 
@@ -197,6 +198,9 @@ void llvm::ilist_traits<::mlir::Block>::addNodeToList(Block *block) {
   Region *region = getParentRegion();
   block->parentValidOpOrderPair.setPointer(region);
   block->blockID = region->nextBlockID++;
+
+  if (auto *obs = mlir::getActiveIRMutationObserver())
+    obs->notifyBlockAttached(block);
 }
 
 /// This is a trait method invoked when an operation is removed from a
@@ -206,6 +210,9 @@ void llvm::ilist_traits<::mlir::Block>::removeNodeFromList(Block *block) {
   block->parentValidOpOrderPair.setPointer(nullptr);
   // The ID is invalid until the block is added to a region again.
   block->blockID = -1u;
+
+  if (auto *obs = mlir::getActiveIRMutationObserver())
+    obs->notifyBlockDetached(block);
 }
 
 /// This is a trait method invoked when an operation is moved from one block
@@ -215,14 +222,28 @@ void llvm::ilist_traits<::mlir::Block>::transferNodesFromList(
   // If we are transferring operations within the same function, the parent
   // pointer doesn't need to be updated.
   auto *curParent = getParentRegion();
-  if (curParent == otherList.getParentRegion())
+  if (curParent == otherList.getParentRegion()) {
+    // A same-region splice is a block reorder — visible to no listener. The
+    // range walk happens only with an observer installed; the early return
+    // is otherwise unchanged.
+    if (auto *obs = mlir::getActiveIRMutationObserver())
+      for (block_iterator it = first; it != last; ++it)
+        obs->notifyBlockMoved(&*it, curParent, curParent,
+                              /*sameRegion=*/true);
     return;
+  }
+
+  Region *oldParent = otherList.getParentRegion();
+  auto *obs = mlir::getActiveIRMutationObserver();
 
   // Update the 'parent' member of each Block and give it an ID in its new
   // region.
   for (; first != last; ++first) {
     first->parentValidOpOrderPair.setPointer(curParent);
     first->blockID = curParent->nextBlockID++;
+    if (obs)
+      obs->notifyBlockMoved(&*first, curParent, oldParent,
+                            /*sameRegion=*/false);
   }
 }
 

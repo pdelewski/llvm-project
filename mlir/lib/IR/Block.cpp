@@ -9,6 +9,7 @@
 #include "mlir/IR/Block.h"
 
 #include "mlir/IR/Builders.h"
+#include "mlir/IR/IRMutationObserver.h"
 #include "mlir/IR/Operation.h"
 
 using namespace mlir;
@@ -158,6 +159,8 @@ auto Block::getArgumentTypes() -> ValueTypeRange<BlockArgListType> {
 BlockArgument Block::addArgument(Type type, Location loc) {
   BlockArgument arg = BlockArgument::create(type, this, arguments.size(), loc);
   arguments.push_back(arg);
+  if (auto *obs = getActiveIRMutationObserver())
+    obs->notifyBlockArgumentAdded(arg);
   return arg;
 }
 
@@ -184,6 +187,8 @@ BlockArgument Block::insertArgument(unsigned index, Type type, Location loc) {
   ++index;
   for (BlockArgument arg : llvm::drop_begin(arguments, index))
     arg.setArgNumber(index++);
+  if (auto *obs = getActiveIRMutationObserver())
+    obs->notifyBlockArgumentAdded(arg);
   return arg;
 }
 
@@ -197,6 +202,8 @@ BlockArgument Block::insertArgument(args_iterator it, Type type, Location loc) {
 
 void Block::eraseArgument(unsigned index) {
   assert(index < arguments.size());
+  if (auto *obs = getActiveIRMutationObserver())
+    obs->notifyBlockArgumentErased(arguments[index]);
   arguments[index].destroy();
   arguments.erase(arguments.begin() + index);
   for (BlockArgument arg : llvm::drop_begin(arguments, index))
@@ -205,8 +212,11 @@ void Block::eraseArgument(unsigned index) {
 
 void Block::eraseArguments(unsigned start, unsigned num) {
   assert(start + num <= arguments.size());
-  for (unsigned i = 0; i < num; ++i)
+  for (unsigned i = 0; i < num; ++i) {
+    if (auto *obs = getActiveIRMutationObserver())
+      obs->notifyBlockArgumentErased(arguments[start + i]);
     arguments[start + i].destroy();
+  }
   arguments.erase(arguments.begin() + start, arguments.begin() + start + num);
   for (BlockArgument arg : llvm::drop_begin(arguments, start))
     arg.setArgNumber(start++);
@@ -225,12 +235,16 @@ void Block::eraseArguments(function_ref<bool(BlockArgument)> shouldEraseFn) {
   // Destroy the first dead argument, this avoids reapplying the predicate to
   // it.
   unsigned index = firstDead->getArgNumber();
+  if (auto *obs = getActiveIRMutationObserver())
+    obs->notifyBlockArgumentErased(*firstDead);
   firstDead->destroy();
 
   // Iterate the remaining arguments to remove any that are now dead.
   for (auto it = std::next(firstDead), e = arguments.end(); it != e; ++it) {
     // Destroy dead arguments, and shift those that are still live.
     if (shouldEraseFn(*it)) {
+      if (auto *obs = getActiveIRMutationObserver())
+        obs->notifyBlockArgumentErased(*it);
       it->destroy();
     } else {
       it->setArgNumber(index++);

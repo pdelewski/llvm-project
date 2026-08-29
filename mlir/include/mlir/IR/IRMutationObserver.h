@@ -40,6 +40,7 @@
 namespace mlir {
 class Block;
 class Operation;
+class Region;
 
 class IRMutationObserver {
 public:
@@ -101,6 +102,26 @@ public:
                                                   StringAttr name,
                                                   Attribute oldValue,
                                                   Attribute newValue) {}
+
+  /// A block argument was added to its owner block (already appended /
+  /// inserted; `arg` knows its block and index).
+  virtual void notifyBlockArgumentAdded(BlockArgument arg) {}
+
+  /// `arg` is about to be erased from its owner block — still intact when
+  /// this fires; destroyed immediately after.
+  virtual void notifyBlockArgumentErased(BlockArgument arg) {}
+
+  /// `block` was linked into a region's block list.
+  virtual void notifyBlockAttached(Block *block) {}
+
+  /// `block` was unlinked from its region's block list. Still alive here.
+  virtual void notifyBlockDetached(Block *block) {}
+
+  /// `block` was spliced from `from` into `to` in one transfer (region
+  /// inlining, block reordering). `sameRegion` marks a reorder within one
+  /// region.
+  virtual void notifyBlockMoved(Block *block, Region *to, Region *from,
+                                bool sameRegion) {}
 
 protected:
   IRMutationObserver() = default;
