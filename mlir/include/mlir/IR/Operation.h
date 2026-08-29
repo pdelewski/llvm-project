@@ -16,6 +16,7 @@
 #include "mlir/IR/Block.h"
 #include "mlir/IR/BuiltinAttributes.h"
 #include "mlir/IR/Diagnostics.h"
+#include "mlir/IR/IRMutationObserver.h"
 #include "mlir/IR/OperationSupport.h"
 #include "mlir/IR/Region.h"
 #include <optional>
@@ -484,8 +485,12 @@ public:
   /// Set a discardable attribute by name.
   void setDiscardableAttr(StringAttr name, Attribute value) {
     NamedAttrList attributes(attrs);
-    if (attributes.set(name, value) != value)
+    if (attributes.set(name, value) != value) {
+      DictionaryAttr oldAttrs = attrs;
       attrs = attributes.getDictionary(getContext());
+      if (IRMutationObserver *obs = getActiveIRMutationObserver())
+        obs->notifyOperationAttributesChanged(this, oldAttrs, attrs);
+    }
   }
   void setDiscardableAttr(StringRef name, Attribute value) {
     setDiscardableAttr(StringAttr::get(getContext(), name), value);
@@ -497,8 +502,12 @@ public:
   Attribute removeDiscardableAttr(StringAttr name) {
     NamedAttrList attributes(attrs);
     Attribute removedAttr = attributes.erase(name);
-    if (removedAttr)
+    if (removedAttr) {
+      DictionaryAttr oldAttrs = attrs;
       attrs = attributes.getDictionary(getContext());
+      if (IRMutationObserver *obs = getActiveIRMutationObserver())
+        obs->notifyOperationAttributesChanged(this, oldAttrs, attrs);
+    }
     return removedAttr;
   }
   Attribute removeDiscardableAttr(StringRef name) {
@@ -547,7 +556,10 @@ public:
   /// Set the discardable attribute dictionary on this operation.
   void setDiscardableAttrs(DictionaryAttr newAttrs) {
     assert(newAttrs && "expected valid attribute dictionary");
+    DictionaryAttr oldAttrs = attrs;
     attrs = newAttrs;
+    if (IRMutationObserver *obs = getActiveIRMutationObserver())
+      obs->notifyOperationAttributesChanged(this, oldAttrs, attrs);
   }
   void setDiscardableAttrs(ArrayRef<NamedAttribute> newAttrs) {
     setDiscardableAttrs(DictionaryAttr::get(getContext(), newAttrs));
@@ -612,8 +624,12 @@ public:
       }
     }
     NamedAttrList attributes(attrs);
-    if (attributes.set(name, value) != value)
+    if (attributes.set(name, value) != value) {
+      DictionaryAttr oldAttrs = attrs;
       attrs = attributes.getDictionary(getContext());
+      if (IRMutationObserver *obs = getActiveIRMutationObserver())
+        obs->notifyOperationAttributesChanged(this, oldAttrs, attrs);
+    }
   }
   void setAttr(StringRef name, Attribute value) {
     setAttr(StringAttr::get(getContext(), name), value);
@@ -631,8 +647,12 @@ public:
     }
     NamedAttrList attributes(attrs);
     Attribute removedAttr = attributes.erase(name);
-    if (removedAttr)
+    if (removedAttr) {
+      DictionaryAttr oldAttrs = attrs;
       attrs = attributes.getDictionary(getContext());
+      if (IRMutationObserver *obs = getActiveIRMutationObserver())
+        obs->notifyOperationAttributesChanged(this, oldAttrs, attrs);
+    }
     return removedAttr;
   }
   Attribute removeAttr(StringRef name) {

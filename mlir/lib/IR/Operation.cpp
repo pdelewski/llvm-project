@@ -315,7 +315,10 @@ void Operation::setAttrs(DictionaryAttr newAttrs) {
     if (discardableAttrs.size() != newAttrs.size())
       newAttrs = DictionaryAttr::get(getContext(), discardableAttrs);
   }
+  DictionaryAttr oldAttrs = attrs;
   attrs = newAttrs;
+  if (IRMutationObserver *obs = getActiveIRMutationObserver())
+    obs->notifyOperationAttributesChanged(this, oldAttrs, attrs);
 }
 void Operation::setAttrs(ArrayRef<NamedAttribute> newAttrs) {
   if (getPropertiesStorageSize()) {
@@ -329,10 +332,16 @@ void Operation::setAttrs(ArrayRef<NamedAttribute> newAttrs) {
       else
         discardableAttrs.push_back(attr);
     }
+    DictionaryAttr oldDiscardable = attrs;
     attrs = DictionaryAttr::get(getContext(), discardableAttrs);
+    if (IRMutationObserver *obs = getActiveIRMutationObserver())
+      obs->notifyOperationAttributesChanged(this, oldDiscardable, attrs);
     return;
   }
+  DictionaryAttr oldAttrs = attrs;
   attrs = DictionaryAttr::get(getContext(), newAttrs);
+  if (IRMutationObserver *obs = getActiveIRMutationObserver())
+    obs->notifyOperationAttributesChanged(this, oldAttrs, attrs);
 }
 
 std::optional<Attribute> Operation::getInherentAttr(StringRef name) {
@@ -340,6 +349,14 @@ std::optional<Attribute> Operation::getInherentAttr(StringRef name) {
 }
 
 void Operation::setInherentAttr(StringAttr name, Attribute value) {
+  // The old-value lookup costs a properties walk; pay it only when someone
+  // is listening.
+  if (IRMutationObserver *obs = getActiveIRMutationObserver()) {
+    Attribute oldValue = getInherentAttr(name).value_or(Attribute());
+    getName().setInherentAttr(this, name, value);
+    obs->notifyOperationInherentAttrChanged(this, name, oldValue, value);
+    return;
+  }
   getName().setInherentAttr(this, name, value);
 }
 

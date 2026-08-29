@@ -31,6 +31,7 @@
 #ifndef MLIR_IR_IRMUTATIONOBSERVER_H
 #define MLIR_IR_IRMUTATIONOBSERVER_H
 
+#include "mlir/IR/BuiltinAttributes.h"
 #include "mlir/IR/Value.h"
 #include "llvm/ADT/ArrayRef.h"
 
@@ -81,6 +82,25 @@ public:
   /// `value`'s type was mutated in place, from `oldType` (already applied).
   /// Value::setType is the single funnel for in-place retyping.
   virtual void notifyValueTypeChanged(Value value, Type oldType) {}
+
+  /// The discardable attribute dictionary of `op` was replaced:
+  /// `oldAttrs` -> `newAttrs` (already applied). Fired from every writer of
+  /// the dictionary — set/removeDiscardableAttr, setAttr/removeAttr's
+  /// discardable branch, setDiscardableAttrs, and setAttrs.
+  virtual void notifyOperationAttributesChanged(Operation *op,
+                                                DictionaryAttr oldAttrs,
+                                                DictionaryAttr newAttrs) {}
+
+  /// An inherent attribute stored in `op`'s properties was set to
+  /// `newValue` (null marks removal), from `oldValue` (null: was absent).
+  /// Fired from setInherentAttr, the transient funnel of the properties
+  /// migration. NOT a complete channel: code that mutates a property struct
+  /// in place through getProperties() bypasses every hook — the one known
+  /// unobservable mutation path.
+  virtual void notifyOperationInherentAttrChanged(Operation *op,
+                                                  StringAttr name,
+                                                  Attribute oldValue,
+                                                  Attribute newValue) {}
 
 protected:
   IRMutationObserver() = default;
