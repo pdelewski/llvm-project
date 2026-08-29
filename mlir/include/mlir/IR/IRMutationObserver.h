@@ -80,6 +80,15 @@ public:
   virtual void notifyRewriterReplaced(Operation *op,
                                       ArrayRef<Value> replacements) {}
 
+  /// `clone` was just created as a deep copy of `original`
+  /// (Operation::clone — the funnel for ALL cloning, including each nested
+  /// op cloned through Region::cloneInto, which fire individually). This is
+  /// the IRMapping's correspondence recorded at the only moment it exists;
+  /// clone provenance is otherwise thrown away and must be reconstructed.
+  /// Fired after the clone is fully built (regions included), before the
+  /// caller sees it.
+  virtual void notifyOperationCloned(Operation *original, Operation *clone) {}
+
   /// `operand` of its owner op was rewired from `oldValue` to `newValue`
   /// (already applied when this fires). Every operand mutation funnels
   /// through OpOperand::set — setOperand calls, rewriter modifications, and

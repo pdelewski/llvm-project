@@ -801,6 +801,12 @@ Operation *Operation::clone(IRMapping &mapper, const CloneOptions &options) {
     for (unsigned i = 0, e = getNumResults(); i != e; ++i)
       mapper.map(getResult(i), newOp->getResult(i));
 
+  // mlir-obs: the clone correspondence, at the only moment it exists as a
+  // fact. Fired with the clone fully built (nested clones fired already,
+  // through this same funnel).
+  if (IRMutationObserver *obs = getActiveIRMutationObserver())
+    obs->notifyOperationCloned(this, newOp);
+
   return newOp;
 }
 
