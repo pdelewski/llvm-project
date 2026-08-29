@@ -40,6 +40,7 @@
 namespace mlir {
 class Block;
 class Operation;
+class Pattern;
 class Region;
 
 class IRMutationObserver {
@@ -69,6 +70,16 @@ public:
   /// fires; it is unlinked immediately after and erased during cleanup.
   virtual void notifyConversionReplaced(Operation *op,
                                         ArrayRef<Value> replacements) {}
+
+  /// A rewrite pattern's matchAndRewrite was entered / has returned — the
+  /// TRANSACTION bracket: every mutation notified between a begin and its
+  /// matching end belongs to that one pattern application. Applications
+  /// nest (folding inside a pattern fires an inner bracket). With this, the
+  /// observer interface is self-sufficient: events (ilist/operand/attr
+  /// hooks), intent (replace/erase/commit/clone), and transactions — no
+  /// actions-API handler required, and no exclusivity conflict with one.
+  virtual void notifyPatternBegin(const Pattern &pattern) {}
+  virtual void notifyPatternEnd(const Pattern &pattern, bool succeeded) {}
 
   /// A rewriter is replacing `op`'s results with `replacements` and will
   /// erase it — RewriterBase::replaceOp, the DECLARED pairing of a greedy

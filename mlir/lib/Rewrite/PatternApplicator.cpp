@@ -11,6 +11,7 @@
 //
 //===----------------------------------------------------------------------===//
 
+#include "mlir/IR/IRMutationObserver.h"
 #include "mlir/Rewrite/PatternApplicator.h"
 #include "ByteCode.h"
 #include "llvm/Support/DebugLog.h"
@@ -220,7 +221,12 @@ LogicalResult PatternApplicator::matchAndRewrite(
             llvm::scope_exit resetListenerCallback(
                 [&] { rewriter.setListener(oldListener); });
 #endif
+            // mlir-obs: the transaction bracket around one application.
+            if (IRMutationObserver *mutObs = getActiveIRMutationObserver())
+              mutObs->notifyPatternBegin(*pattern);
             result = pattern->matchAndRewrite(op, rewriter);
+            if (IRMutationObserver *mutObs = getActiveIRMutationObserver())
+              mutObs->notifyPatternEnd(*pattern, succeeded(result));
             LDBG() << " -> matchAndRewrite "
                    << (succeeded(result) ? "successful" : "failed");
           }
