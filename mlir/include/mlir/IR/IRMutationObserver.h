@@ -80,6 +80,15 @@ public:
   virtual void notifyRewriterReplaced(Operation *op,
                                       ArrayRef<Value> replacements) {}
 
+  /// A rewriter is erasing `op` with NO replacement — RewriterBase::eraseOp,
+  /// the rewriter's declared "this became nothing". Completes the intent
+  /// pair with notifyRewriterReplaced: every greedy-rewriter disposal is now
+  /// testimony. Fires at entry, op fully alive; also fires on the eraseOp
+  /// inside replaceOp (consumers see the op already claimed and no-op).
+  /// ConversionPatternRewriter overrides eraseOp, so the deferred path
+  /// stays with notifyConversionReplaced.
+  virtual void notifyRewriterErased(Operation *op) {}
+
   /// `clone` was just created as a deep copy of `original`
   /// (Operation::clone — the funnel for ALL cloning, including each nested
   /// op cloned through Region::cloneInto, which fire individually). This is

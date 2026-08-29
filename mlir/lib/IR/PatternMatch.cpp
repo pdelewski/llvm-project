@@ -170,6 +170,10 @@ void RewriterBase::replaceOp(Operation *op, Operation *newOp) {
 /// the given operation *must* be known to be dead.
 void RewriterBase::eraseOp(Operation *op) {
   assert(op->use_empty() && "expected 'op' to have no uses");
+
+  // mlir-obs: declared disposal — the rewriter says this op became nothing.
+  if (IRMutationObserver *obs = getActiveIRMutationObserver())
+    obs->notifyRewriterErased(op);
   auto *rewriteListener = dyn_cast_if_present<Listener>(listener);
 
   // If the current insertion point is before the erased operation, we adjust
