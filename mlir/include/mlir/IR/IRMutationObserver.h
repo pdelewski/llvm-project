@@ -70,6 +70,16 @@ public:
   virtual void notifyConversionReplaced(Operation *op,
                                         ArrayRef<Value> replacements) {}
 
+  /// A rewriter is replacing `op`'s results with `replacements` and will
+  /// erase it — RewriterBase::replaceOp, the DECLARED pairing of a greedy
+  /// rewrite, fired at entry while both sides are live. This is the same
+  /// claim notifyConversionReplaced carries for the conversion driver
+  /// (whose ConversionPatternRewriter overrides replaceOp, so the two
+  /// never double-fire): the pass itself says these values stand in for
+  /// that op — intent, not reconstruction.
+  virtual void notifyRewriterReplaced(Operation *op,
+                                      ArrayRef<Value> replacements) {}
+
   /// `operand` of its owner op was rewired from `oldValue` to `newValue`
   /// (already applied when this fires). Every operand mutation funnels
   /// through OpOperand::set — setOperand calls, rewriter modifications, and

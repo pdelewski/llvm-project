@@ -6,6 +6,7 @@
 //
 //===----------------------------------------------------------------------===//
 
+#include "mlir/IR/IRMutationObserver.h"
 #include "mlir/IR/PatternMatch.h"
 #include "mlir/IR/Iterators.h"
 #include "mlir/IR/RegionKindInterface.h"
@@ -128,6 +129,13 @@ void RewriterBase::replaceOp(Operation *op, ValueRange newValues) {
   assert(op->getNumResults() == newValues.size() &&
          "incorrect # of replacement values");
 
+  // mlir-obs: the declared pairing, both sides live. The materialization of
+  // the range costs only when an observer is installed.
+  if (IRMutationObserver *obs = getActiveIRMutationObserver()) {
+    SmallVector<Value> repl(newValues.begin(), newValues.end());
+    obs->notifyRewriterReplaced(op, repl);
+  }
+
   // Replace all result uses. Also notifies the listener of modifications.
   replaceAllOpUsesWith(op, newValues);
 
@@ -142,6 +150,14 @@ void RewriterBase::replaceOp(Operation *op, Operation *newOp) {
   assert(op && newOp && "expected non-null op");
   assert(op->getNumResults() == newOp->getNumResults() &&
          "ops have different number of results");
+
+  // mlir-obs: same declared pairing as the ValueRange overload (which this
+  // does NOT call — both overloads fire).
+  if (IRMutationObserver *obs = getActiveIRMutationObserver()) {
+    SmallVector<Value> repl(newOp->getResults().begin(),
+                            newOp->getResults().end());
+    obs->notifyRewriterReplaced(op, repl);
+  }
 
   // Replace all result uses. Also notifies the listener of modifications.
   replaceAllOpUsesWith(op, newOp->getResults());
