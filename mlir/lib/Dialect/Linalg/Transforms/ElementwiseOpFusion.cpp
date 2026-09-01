@@ -10,6 +10,7 @@
 //
 //===----------------------------------------------------------------------===//
 
+#include "llvm/Support/CommandLine.h"
 #include "mlir/Dialect/Linalg/Passes.h"
 
 #include "mlir/Dialect/Affine/IR/AffineOps.h"
@@ -2450,11 +2451,382 @@ void mlir::linalg::populateFoldReshapeOpsByCollapsingPatterns(
                                                      controlFoldingReshapes);
 }
 
+static llvm::cl::opt<bool> clFuseElementwiseThroughReshape(
+    "mlir-linalg-fuse-elementwise-through-reshape",
+    llvm::cl::desc("Enable fusing elementwise ops across interposed static "
+                   "tensor.reshape ops (mlir-obs patch 0010); false "
+                   "restores the pre-patch fusion capability"),
+    llvm::cl::init(true));
+
+namespace {
+/// mlir-obs patch 0010 (mechanism extension, see the mlir-obs repo's
+/// demos 13/20): fuse an elementwise producer into an elementwise
+/// consumer ACROSS an interposed static `tensor.reshape`.
+///
+/// The core fusion mechanism requires a direct producer->consumer edge
+/// over a shared iteration space; a tensor.reshape (the shape-operand
+/// form — not expand/collapse_shape, which other patterns handle) breaks
+/// both, so no configuration of the existing patterns can fuse
+///
+///   %p = linalg.generic ...            : tensor<AxB>   (elementwise)
+///   %r = tensor.reshape %p(%shape)     : tensor<N>     (static, bijective)
+///   %c = linalg.generic ins(%r, ...)   : tensor<N>     (elementwise)
+///
+/// This pattern constructs the fused kernel over the PRODUCER's
+/// iteration space: both bodies inlined, the consumer's other operands
+/// re-viewed through the inverse reshape (static tensor.reshape ops,
+/// metadata-only), and one trailing reshape restoring the consumer's
+/// result type. Legal because a static reshape is an element bijection
+/// and both ops are elementwise with identity maps. v1 fails closed on:
+/// dynamic shapes, non-identity maps, multi-result ops, reshapes whose
+/// shape operand is not constant-foldable to a static type.
+struct FuseElementwiseThroughReshape : public OpRewritePattern<GenericOp> {
+  FuseElementwiseThroughReshape(MLIRContext *context,
+                                ControlFusionFn fun,
+                                PatternBenefit benefit = 1)
+      : OpRewritePattern<GenericOp>(context, benefit),
+        controlFn(std::move(fun)) {}
+
+  static bool isIdentityElementwise(GenericOp op) {
+    if (!op || op.getNumResults() != 1 || !isElementwise(op))
+      return false;
+    return llvm::all_of(op.getIndexingMapsArray(),
+                        [](AffineMap m) { return m.isIdentity(); });
+  }
+
+  LogicalResult matchAndRewrite(GenericOp consumer,
+                                PatternRewriter &rewriter) const override {
+    if (!clFuseElementwiseThroughReshape)
+      return failure();
+    if (!isIdentityElementwise(consumer))
+      return failure();
+    // Find an input operand fed by tensor.reshape(producer).
+    tensor::ReshapeOp reshapeOp;
+    GenericOp producer;
+    OpOperand *fusedOperand = nullptr;
+    for (OpOperand *opOperand : consumer.getDpsInputOperands()) {
+      auto r = opOperand->get().getDefiningOp<tensor::ReshapeOp>();
+      if (!r || !r->hasOneUse())
+        continue;
+      auto p = r.getSource().getDefiningOp<GenericOp>();
+      if (!isIdentityElementwise(p) || !p->hasOneUse())
+        continue;
+      auto srcTy = dyn_cast<RankedTensorType>(r.getSource().getType());
+      auto resTy = dyn_cast<RankedTensorType>(r.getResult().getType());
+      if (!srcTy || !resTy || !srcTy.hasStaticShape() ||
+          !resTy.hasStaticShape())
+        continue;
+      reshapeOp = r;
+      producer = p;
+      fusedOperand = opOperand;
+      break;
+    }
+    if (!reshapeOp)
+      return rewriter.notifyMatchFailure(
+          consumer, "no single-use static reshape-of-elementwise input");
+    // Deliberately NOT consulting the ControlFusionFn here: its contract
+    // hands callbacks an operand whose defining op is the producer linalg
+    // op, and existing control implementations (e.g. IREE's
+    // areFusableAsElementwiseOps) dereference it as such — our fused
+    // operand is defined by the reshape, which crashes them. Through-
+    // reshape fusion needs its own control hook; v1 fires whenever legal.
+
+    Location loc = consumer.getLoc();
+    auto prodTy = cast<RankedTensorType>(producer.getResult(0).getType());
+    auto consTy = cast<RankedTensorType>(consumer.getResult(0).getType());
+    int64_t prodRank = prodTy.getRank();
+
+    // The producer-shape view of the consumer's OTHER inputs: a static
+    // tensor.reshape each (metadata; folds on splat constants).
+    Value prodShape = arith::ConstantOp::create(
+        rewriter, loc,
+        RankedTensorType::get({prodRank}, rewriter.getI64Type()),
+        rewriter.getI64TensorAttr(prodTy.getShape()));
+    SmallVector<Value> newInputs;
+    for (OpOperand *in : producer.getDpsInputOperands())
+      newInputs.push_back(in->get());
+    unsigned producerArgCount = newInputs.size();
+    for (OpOperand *in : consumer.getDpsInputOperands()) {
+      if (in == fusedOperand)
+        continue;
+      auto inTy = cast<RankedTensorType>(in->get().getType());
+      auto viewTy =
+          RankedTensorType::get(prodTy.getShape(), inTy.getElementType());
+      newInputs.push_back(tensor::ReshapeOp::create(rewriter, loc, viewTy,
+                                                    in->get(), prodShape));
+    }
+
+    auto outTy =
+        RankedTensorType::get(prodTy.getShape(), consTy.getElementType());
+    Value outEmpty = tensor::EmptyOp::create(rewriter, loc, prodTy.getShape(),
+                                             consTy.getElementType());
+    unsigned numInputs = newInputs.size();
+    SmallVector<AffineMap> maps(
+        numInputs + 1,
+        rewriter.getMultiDimIdentityMap(prodRank));
+    SmallVector<utils::IteratorType> iters(prodRank,
+                                           utils::IteratorType::parallel);
+    auto fused = GenericOp::create(
+        rewriter, loc, TypeRange{outTy}, newInputs, ValueRange{outEmpty},
+        maps, iters,
+        [&](OpBuilder &b, Location bodyLoc, ValueRange args) {
+          // Inline the producer body over its own arguments.
+          IRMapping map;
+          Block &pBlock = producer.getRegion().front();
+          for (auto [i, arg] :
+               llvm::enumerate(pBlock.getArguments().drop_back(1)))
+            map.map(arg, args[i]);
+          // Producer out-arg: unused for pure elementwise bodies; map to
+          // the fused out-arg to stay safe.
+          map.map(pBlock.getArguments().back(), args.back());
+          Value producedVal;
+          for (Operation &op : pBlock.without_terminator())
+            b.clone(op, map);
+          producedVal = map.lookupOrDefault(
+              cast<linalg::YieldOp>(pBlock.getTerminator()).getOperand(0));
+          // Inline the consumer body, its fused operand replaced by the
+          // produced value and its other inputs by the re-viewed args.
+          IRMapping cmap;
+          Block &cBlock = consumer.getRegion().front();
+          unsigned viewIdx = producerArgCount;
+          for (auto [i, in] :
+               llvm::enumerate(consumer.getDpsInputOperands())) {
+            if (in == fusedOperand)
+              cmap.map(cBlock.getArgument(i), producedVal);
+            else
+              cmap.map(cBlock.getArgument(i), args[viewIdx++]);
+          }
+          cmap.map(cBlock.getArguments().back(), args.back());
+          for (Operation &op : cBlock.without_terminator())
+            b.clone(op, cmap);
+          Value yielded = cmap.lookupOrDefault(
+              cast<linalg::YieldOp>(cBlock.getTerminator()).getOperand(0));
+          linalg::YieldOp::create(b, bodyLoc, yielded);
+        });
+
+    // Restore the consumer's result type with one metadata reshape.
+    Value consShape = arith::ConstantOp::create(
+        rewriter, loc,
+        RankedTensorType::get({consTy.getRank()}, rewriter.getI64Type()),
+        rewriter.getI64TensorAttr(consTy.getShape()));
+    Value back = tensor::ReshapeOp::create(rewriter, loc, consTy,
+                                           fused.getResult(0), consShape);
+    rewriter.replaceOp(consumer, back);
+    return success();
+  }
+
+private:
+  ControlFusionFn controlFn;
+};
+} // namespace
+
+static llvm::cl::opt<bool> clDelinearizePeriodicAccess(
+    "mlir-linalg-delinearize-periodic-access",
+    llvm::cl::desc("Delinearize linalg iteration spaces to remove "
+                   "mod/floordiv-by-constant (periodic) operand accesses "
+                   "(mlir-obs patch 0012); false restores the pre-patch "
+                   "behaviour"),
+    llvm::cl::init(true));
+
+namespace {
+/// mlir-obs patch 0012 (mechanism: iteration-space delinearization; see
+/// the mlir-obs repo's demo 21).
+///
+/// Periodic access — `x[i mod C]`, from tile/repeat, circular padding and
+/// flattened broadcasts — leaves a linalg op whose indexing maps are not
+/// projected permutations. Everything downstream then degrades: the op is
+/// excluded from fusion-by-expansion (its gate requires permutations),
+/// tiling emits per-tile offset arithmetic, and the loop stays narrow.
+/// Measured cost on a 1M-element case: 1.84 ms vs 0.097 ms for the same
+/// math written without periodicity (19x).
+///
+/// This pattern removes the periodicity instead of coping with it: split
+/// the offending iteration dimension `d` of extent N into (outer, inner)
+/// of extents (N / C, C), so that
+///
+///     d mod C      -> inner
+///     d floordiv C -> outer
+///     d            -> (outer, inner) on an expand_shaped operand
+///
+/// and every map in the new, one-rank-higher iteration space is a
+/// projected permutation. The result is collapse_shaped back to its
+/// declared type, so the op's contract is unchanged.
+///
+/// v1 fails closed on: dynamic shapes, non-parallel iterators, several
+/// distinct periods or dims, N not a multiple of C, bodies using
+/// linalg.index, and any non-permutation expression other than
+/// `d mod C` / `d floordiv C`.
+struct DelinearizePeriodicAccess : public OpRewritePattern<GenericOp> {
+  using OpRewritePattern<GenericOp>::OpRewritePattern;
+
+  LogicalResult matchAndRewrite(GenericOp op,
+                                PatternRewriter &rewriter) const override {
+    if (!clDelinearizePeriodicAccess)
+      return failure();
+    if (!op.hasPureTensorSemantics() || op.getNumResults() != 1)
+      return rewriter.notifyMatchFailure(op, "not single-result tensor op");
+    if (llvm::any_of(op.getIteratorTypesArray(), [](utils::IteratorType it) {
+          return it != utils::IteratorType::parallel;
+        }))
+      return rewriter.notifyMatchFailure(op, "not all-parallel");
+    if (!llvm::all_of(op->getOperandTypes(), [](Type t) {
+          auto tt = dyn_cast<RankedTensorType>(t);
+          return tt && tt.hasStaticShape();
+        }))
+      return rewriter.notifyMatchFailure(op, "dynamic or non-tensor operand");
+    for (Operation &inner : op.getRegion().front())
+      if (isa<IndexOp>(inner))
+        return rewriter.notifyMatchFailure(op, "body uses linalg.index");
+
+    // Find the single (dim, period) pair used periodically.
+    std::optional<unsigned> periodicDim;
+    int64_t period = 0;
+    for (AffineMap map : op.getIndexingMapsArray()) {
+      for (AffineExpr expr : map.getResults()) {
+        if (isa<AffineDimExpr>(expr) || isa<AffineConstantExpr>(expr))
+          continue;
+        auto bin = dyn_cast<AffineBinaryOpExpr>(expr);
+        if (!bin || (bin.getKind() != AffineExprKind::Mod &&
+                     bin.getKind() != AffineExprKind::FloorDiv))
+          return rewriter.notifyMatchFailure(op, "unsupported expression");
+        auto dim = dyn_cast<AffineDimExpr>(bin.getLHS());
+        auto cst = dyn_cast<AffineConstantExpr>(bin.getRHS());
+        if (!dim || !cst || cst.getValue() <= 1)
+          return rewriter.notifyMatchFailure(op, "unsupported mod/div operands");
+        if (periodicDim && (*periodicDim != dim.getPosition() ||
+                            period != cst.getValue()))
+          return rewriter.notifyMatchFailure(op, "several periods");
+        periodicDim = dim.getPosition();
+        period = cst.getValue();
+      }
+    }
+    if (!periodicDim)
+      return rewriter.notifyMatchFailure(op, "no periodic access");
+
+    SmallVector<int64_t> ranges = op.getStaticLoopRanges();
+    unsigned d = *periodicDim;
+    if (d >= ranges.size() || ShapedType::isDynamic(ranges[d]))
+      return rewriter.notifyMatchFailure(op, "dynamic periodic extent");
+    int64_t extent = ranges[d];
+    if (extent <= period || extent % period != 0)
+      return rewriter.notifyMatchFailure(op, "extent is not a multiple of the "
+                                             "period");
+
+    MLIRContext *ctx = rewriter.getContext();
+    Location loc = op.getLoc();
+    unsigned oldRank = op.getNumLoops();
+    unsigned newRank = oldRank + 1;
+    // New dim numbering: dims < d unchanged; d -> outer, d+1 -> inner;
+    // dims > d shift up by one.
+    auto shift = [&](unsigned pos) -> unsigned {
+      return pos < d ? pos : pos + 1;
+    };
+    AffineExpr outer = getAffineDimExpr(d, ctx);
+    AffineExpr inner = getAffineDimExpr(d + 1, ctx);
+
+    // Rewrite every operand: new map, plus an expand_shape when a plain
+    // `d` reference must become (outer, inner).
+    SmallVector<Value> newInputs;
+    SmallVector<AffineMap> newMaps;
+    auto rewriteOperand = [&](OpOperand *operand,
+                              Value &newValue) -> LogicalResult {
+      AffineMap map = op.getMatchingIndexingMap(operand);
+      auto type = cast<RankedTensorType>(operand->get().getType());
+      SmallVector<AffineExpr> results;
+      SmallVector<ReassociationIndices> reassoc;
+      SmallVector<int64_t> newShape;
+      bool needsExpand = false;
+      for (auto [resIdx, expr] : llvm::enumerate(map.getResults())) {
+        int64_t dimSize = type.getDimSize(resIdx);
+        if (auto dim = dyn_cast<AffineDimExpr>(expr)) {
+          if (dim.getPosition() == d) {
+            // Plain linear reference: split the operand dimension.
+            if (dimSize != extent)
+              return failure();
+            results.push_back(outer);
+            results.push_back(inner);
+            reassoc.push_back({static_cast<int64_t>(newShape.size()),
+                               static_cast<int64_t>(newShape.size() + 1)});
+            newShape.push_back(extent / period);
+            newShape.push_back(period);
+            needsExpand = true;
+            continue;
+          }
+          results.push_back(getAffineDimExpr(shift(dim.getPosition()), ctx));
+          reassoc.push_back({static_cast<int64_t>(newShape.size())});
+          newShape.push_back(dimSize);
+          continue;
+        }
+        auto bin = cast<AffineBinaryOpExpr>(expr);
+        results.push_back(bin.getKind() == AffineExprKind::Mod ? inner : outer);
+        reassoc.push_back({static_cast<int64_t>(newShape.size())});
+        newShape.push_back(dimSize);
+      }
+      newMaps.push_back(AffineMap::get(newRank, 0, results, ctx));
+      if (!needsExpand) {
+        newValue = operand->get();
+        return success();
+      }
+      auto expandedType =
+          RankedTensorType::get(newShape, type.getElementType());
+      newValue = tensor::ExpandShapeOp::create(rewriter, loc, expandedType,
+                                               operand->get(), reassoc);
+      return success();
+    };
+
+    for (OpOperand *in : op.getDpsInputOperands()) {
+      Value v;
+      if (failed(rewriteOperand(in, v)))
+        return rewriter.notifyMatchFailure(op, "operand shape mismatch");
+      newInputs.push_back(v);
+    }
+    OpOperand *initOperand = op.getDpsInitOperand(0);
+    Value newInit;
+    if (failed(rewriteOperand(initOperand, newInit)))
+      return rewriter.notifyMatchFailure(op, "init shape mismatch");
+
+    SmallVector<utils::IteratorType> iterators(newRank,
+                                              utils::IteratorType::parallel);
+    auto newResultType = cast<RankedTensorType>(newInit.getType());
+    auto newOp = GenericOp::create(
+        rewriter, loc, TypeRange{newResultType}, newInputs,
+        ValueRange{newInit}, newMaps, iterators,
+        [](OpBuilder &, Location, ValueRange) {});
+    newOp.getRegion().getBlocks().clear();
+    IRMapping bodyMap;
+    op.getRegion().cloneInto(&newOp.getRegion(), bodyMap);
+
+    // Collapse the result back to the declared type.
+    auto origType = cast<RankedTensorType>(op.getResult(0).getType());
+    AffineMap initMap = op.getMatchingIndexingMap(initOperand);
+    SmallVector<ReassociationIndices> resReassoc;
+    int64_t pos = 0;
+    for (AffineExpr expr : initMap.getResults()) {
+      auto dim = dyn_cast<AffineDimExpr>(expr);
+      if (dim && dim.getPosition() == d) {
+        resReassoc.push_back({pos, pos + 1});
+        pos += 2;
+      } else {
+        resReassoc.push_back({pos});
+        pos += 1;
+      }
+    }
+    Value collapsed = tensor::CollapseShapeOp::create(
+        rewriter, loc, origType, newOp.getResult(0), resReassoc);
+    rewriter.replaceOp(op, collapsed);
+    return success();
+  }
+};
+} // namespace
+
 void mlir::linalg::populateElementwiseOpsFusionPatterns(
     RewritePatternSet &patterns,
     const ControlFusionFn &controlElementwiseOpsFusion) {
   auto *context = patterns.getContext();
   patterns.add<FuseElementwiseOps>(context, controlElementwiseOpsFusion);
+  patterns.add<FuseElementwiseThroughReshape>(context,
+                                              controlElementwiseOpsFusion);
+  patterns.add<DelinearizePeriodicAccess>(context);
   patterns.add<FoldFillWithGenericOp, FoldScalarOrSplatConstant,
                RemoveOutsDependency>(context);
   // Add the patterns that clean up dead operands and results.
