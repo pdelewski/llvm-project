@@ -21,6 +21,14 @@ using llvm::LogicalResult;
 using llvm::ParseResult;
 using llvm::succeeded;
 using llvm::success;
+
+// Refusal recording, so a pass can spell `declined(...)` unqualified the same
+// way it spells `failure()`.
+using llvm::declined;
+using llvm::declinedFailure;
+using llvm::DeclineKind;
+using llvm::DeclineSink;
+using llvm::FailureOrigin;
 } // namespace mlir
 
 #endif // MLIR_SUPPORT_LOGICALRESULT_H

@@ -223,7 +223,7 @@ LogicalResult PatternApplicator::matchAndRewrite(
 #endif
             // mlir-obs: the transaction bracket around one application.
             if (IRMutationObserver *mutObs = getActiveIRMutationObserver())
-              mutObs->notifyPatternBegin(*pattern);
+              mutObs->notifyPatternBegin(*pattern, op);
             result = pattern->matchAndRewrite(op, rewriter);
             if (IRMutationObserver *mutObs = getActiveIRMutationObserver())
               mutObs->notifyPatternEnd(*pattern, succeeded(result));

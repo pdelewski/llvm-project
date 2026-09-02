@@ -78,7 +78,11 @@ public:
   /// observer interface is self-sufficient: events (ilist/operand/attr
   /// hooks), intent (replace/erase/commit/clone), and transactions — no
   /// actions-API handler required, and no exclusivity conflict with one.
-  virtual void notifyPatternBegin(const Pattern &pattern) {}
+  ///
+  /// `root` is the op the pattern was offered. A bracket without it says that
+  /// SOMETHING declined and not what it was asked about, which is the
+  /// difference between a decline record and a statistic.
+  virtual void notifyPatternBegin(const Pattern &pattern, Operation *root) {}
   virtual void notifyPatternEnd(const Pattern &pattern, bool succeeded) {}
 
   /// A rewriter is replacing `op`'s results with `replacements` and will
