@@ -22,6 +22,7 @@
 #include "mlir/Dialect/Tensor/Transforms/Transforms.h"
 #include "mlir/IR/AffineExpr.h"
 #include "mlir/IR/AffineMap.h"
+#include "mlir/IR/Remarks.h"
 #include "mlir/IR/Matchers.h"
 #include "mlir/IR/PatternMatch.h"
 #include "mlir/Support/LLVM.h"
@@ -473,11 +474,16 @@ public:
   LogicalResult matchAndRewrite(GenericOp genericOp,
                                 PatternRewriter &rewriter) const override {
     // Find the first operand that is defined by another generic op on tensors.
+    unsigned notFusable = 0, rejectedByControl = 0;
     for (OpOperand &opOperand : genericOp->getOpOperands()) {
-      if (!areElementwiseOpsFusable(&opOperand))
+      if (!areElementwiseOpsFusable(&opOperand)) {
+        ++notFusable;
         continue;
-      if (!controlFn(&opOperand))
+      }
+      if (!controlFn(&opOperand)) {
+        ++rejectedByControl;
         continue;
+      }
 
       Operation *producer = opOperand.get().getDefiningOp();
 
@@ -486,6 +492,14 @@ public:
           fuseElementwiseOps(rewriter, &opOperand);
       if (failed(fusionResult))
         return rewriter.notifyMatchFailure(genericOp, "fusion failed");
+
+      // A pairing witness for observers: the new op IS producer+consumer.
+      remark::passed(fusionResult->fusedOp,
+                     remark::RemarkOpts::name("fuse-elementwise")
+                         .category("Fusion"))
+          << remark::reason("fused producer {0} into consumer {1}",
+                            producer->getName().getStringRef(),
+                            genericOp->getName().getStringRef());
 
       // Perform the fusion.
       for (auto [origVal, replacement] : fusionResult->replacements) {
@@ -497,7 +511,12 @@ public:
       rewriter.eraseOp(genericOp);
       return success();
     }
-    return failure();
+    // The exit the depth analysis flagged: ran every operand, said nothing.
+    return rewriter.notifyMatchFailure(
+        genericOp, "no fusable operand: " + Twine(notFusable) +
+                       " not elementwise-fusable with their producer, " +
+                       Twine(rejectedByControl) + " rejected by the control "
+                       "function");
   }
 
 private:

@@ -2230,8 +2230,8 @@ static LogicalResult vectorizeConvOpPrecondition(linalg::LinalgOp convOp) {
 static LogicalResult declinedVectorization(linalg::LinalgOp op,
                                            const Twine &reason) {
   std::string text = reason.str();
-  remark::missed(op->getLoc(), remark::RemarkOpts::name("vectorize")
-                                   .category("Vectorization"))
+  remark::missed(op.getOperation(), remark::RemarkOpts::name("vectorize")
+                                        .category("Vectorization"))
       << remark::reason("{0}", text)
       << remark::metric("op", op->getName().getStringRef());
   return failure();

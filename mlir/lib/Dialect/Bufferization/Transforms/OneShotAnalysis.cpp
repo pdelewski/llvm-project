@@ -48,6 +48,7 @@
 #include "mlir/Dialect/Bufferization/Transforms/Transforms.h"
 #include "mlir/Dialect/MemRef/IR/MemRef.h"
 #include "mlir/IR/AsmState.h"
+#include "mlir/IR/Remarks.h"
 #include "mlir/IR/Dominance.h"
 #include "mlir/IR/Iterators.h"
 #include "mlir/IR/Operation.h"
@@ -994,14 +995,30 @@ bufferizableInPlaceAnalysisImpl(OpOperand &operand, OneShotAnalysisState &state,
          << "Analyzing operand #" << operand.getOperandNumber() << " of "
          << OpWithFlags(operand.getOwner(), OpPrintingFlags().skipRegions());
 
-  bool foundInterference =
-      wouldCreateWriteToNonWritableBuffer(operand, state) ||
+  bool nonWritable = wouldCreateWriteToNonWritableBuffer(operand, state);
+  bool rawConflict =
+      !nonWritable &&
       wouldCreateReadAfterWriteInterference(operand, domInfo, state);
 
-  if (foundInterference)
+  if (nonWritable || rawConflict) {
+    // State the verdict: this is the single point where "reused in place"
+    // vs "a copy is inserted" is decided, and the memory chart's
+    // allocations trace back to exactly these operands.
+    remark::missed(operand.getOwner(),
+                   remark::RemarkOpts::name("bufferize-in-place")
+                       .category("Bufferization"))
+        << remark::reason(nonWritable
+                              ? "operand #{0} would write to a non-writable "
+                                "buffer; bufferized out of place (a copy is "
+                                "inserted)"
+                              : "operand #{0} has a read-after-write "
+                                "conflict; bufferized out of place (a copy "
+                                "is inserted)",
+                          operand.getOperandNumber());
     state.bufferizeOutOfPlace(operand);
-  else
+  } else {
     state.bufferizeInPlace(operand);
+  }
 
   LDBG() << "//===-------------------------------------------===//";
   return success();
