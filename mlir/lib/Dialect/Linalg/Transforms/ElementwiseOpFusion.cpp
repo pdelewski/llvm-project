@@ -2665,7 +2665,8 @@ struct DelinearizePeriodicAccess : public OpRewritePattern<GenericOp> {
   LogicalResult matchAndRewrite(GenericOp op,
                                 PatternRewriter &rewriter) const override {
     if (!clDelinearizePeriodicAccess)
-      return failure();
+      return rewriter.notifyMatchFailure(
+          op, "disabled: mlir-linalg-delinearize-periodic-access is off");
     if (!op.hasPureTensorSemantics() || op.getNumResults() != 1)
       return rewriter.notifyMatchFailure(op, "not single-result tensor op");
     if (llvm::any_of(op.getIteratorTypesArray(), [](utils::IteratorType it) {
