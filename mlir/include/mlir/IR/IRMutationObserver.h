@@ -34,10 +34,12 @@
 #include "mlir/IR/BuiltinAttributes.h"
 #include "mlir/IR/Value.h"
 #include "llvm/ADT/ArrayRef.h"
+#include "llvm/ADT/STLFunctionalExtras.h"
 
 #include <atomic>
 
 namespace mlir {
+class Diagnostic;
 class Block;
 class Operation;
 class Pattern;
@@ -84,6 +86,17 @@ public:
   /// difference between a decline record and a statistic.
   virtual void notifyPatternBegin(const Pattern &pattern, Operation *root) {}
   virtual void notifyPatternEnd(const Pattern &pattern, bool succeeded) {}
+
+  /// The enclosing pattern application stated why it refused —
+  /// RewriterBase::notifyMatchFailure forwards here while an observer is
+  /// installed. `reasonCallback` materializes the author's text on demand,
+  /// so an observer that is not recording reasons pays nothing beyond the
+  /// virtual call, and the many patterns that never state a reason cost
+  /// nothing at all. This is the reason channel the bracket lacks: BEGIN
+  /// says what op was offered, END says it refused, this says why.
+  virtual void
+  notifyMatchFailure(Location loc,
+                     function_ref<void(Diagnostic &)> reasonCallback) {}
 
   /// A rewriter is replacing `op`'s results with `replacements` and will
   /// erase it — RewriterBase::replaceOp, the DECLARED pairing of a greedy

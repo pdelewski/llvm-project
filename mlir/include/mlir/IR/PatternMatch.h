@@ -10,6 +10,7 @@
 #define MLIR_IR_PATTERNMATCH_H
 
 #include "mlir/IR/Builders.h"
+#include "mlir/IR/IRMutationObserver.h"
 #include "mlir/IR/BuiltinOps.h"
 #include "llvm/ADT/FunctionExtras.h"
 #include "llvm/Support/TypeName.h"
@@ -733,6 +734,11 @@ public:
     if (auto *rewriteListener = dyn_cast_if_present<Listener>(listener))
       rewriteListener->notifyMatchFailure(
           loc, function_ref<void(Diagnostic &)>(reasonCallback));
+    // mlir-obs: the observer brackets the enclosing pattern application;
+    // this is the refusal's stated reason, delivered inside that bracket.
+    if (IRMutationObserver *obs = getActiveIRMutationObserver())
+      obs->notifyMatchFailure(loc,
+                              function_ref<void(Diagnostic &)>(reasonCallback));
     return failure();
   }
   template <typename CallbackT>
@@ -741,6 +747,9 @@ public:
     if (auto *rewriteListener = dyn_cast_if_present<Listener>(listener))
       rewriteListener->notifyMatchFailure(
           op->getLoc(), function_ref<void(Diagnostic &)>(reasonCallback));
+    if (IRMutationObserver *obs = getActiveIRMutationObserver())
+      obs->notifyMatchFailure(op->getLoc(),
+                              function_ref<void(Diagnostic &)>(reasonCallback));
     return failure();
   }
   template <typename ArgT>
