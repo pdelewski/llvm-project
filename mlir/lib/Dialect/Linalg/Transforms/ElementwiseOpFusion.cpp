@@ -2664,9 +2664,6 @@ struct DelinearizePeriodicAccess : public OpRewritePattern<GenericOp> {
 
   LogicalResult matchAndRewrite(GenericOp op,
                                 PatternRewriter &rewriter) const override {
-    if (!clDelinearizePeriodicAccess)
-      return rewriter.notifyMatchFailure(
-          op, "disabled: mlir-linalg-delinearize-periodic-access is off");
     if (!op.hasPureTensorSemantics() || op.getNumResults() != 1)
       return rewriter.notifyMatchFailure(op, "not single-result tensor op");
     if (llvm::any_of(op.getIteratorTypesArray(), [](utils::IteratorType it) {
@@ -2715,6 +2712,16 @@ struct DelinearizePeriodicAccess : public OpRewritePattern<GenericOp> {
     if (extent <= period || extent % period != 0)
       return rewriter.notifyMatchFailure(op, "extent is not a multiple of the "
                                              "period");
+    // Gate LAST, so the refusal states a fact about this op: a periodic
+    // access is present and the mechanism that would delinearize it is
+    // switched off. Gating first would fire the reason on every generic in
+    // the module and say nothing. The match above is cheap (map inspection,
+    // no IR built), so a disabled run pays analysis only where the shape
+    // fits.
+    if (!clDelinearizePeriodicAccess)
+      return rewriter.notifyMatchFailure(
+          op, "periodic access found (period " + std::to_string(period) +
+                  "), but mlir-linalg-delinearize-periodic-access is off");
 
     MLIRContext *ctx = rewriter.getContext();
     Location loc = op.getLoc();
