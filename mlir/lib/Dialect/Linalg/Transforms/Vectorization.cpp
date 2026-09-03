@@ -30,6 +30,7 @@
 #include "mlir/IR/Builders.h"
 #include "mlir/IR/BuiltinTypeInterfaces.h"
 #include "mlir/IR/BuiltinTypes.h"
+#include "mlir/IR/Remarks.h"
 #include "mlir/IR/OpDefinition.h"
 #include "mlir/IR/PatternMatch.h"
 #include "mlir/IR/Value.h"
@@ -2221,6 +2222,21 @@ static LogicalResult vectorizeConvOpPrecondition(linalg::LinalgOp convOp) {
   return success();
 }
 
+/// States a vectorization refusal through mlir::remark (category
+/// "Vectorization"). These exits are reached from pass code walking
+/// candidates (no pattern bracket, no listener), so the remark is the only
+/// channel that can carry the reason out. Costs a pointer check unless a
+/// remark engine is installed.
+static LogicalResult declinedVectorization(linalg::LinalgOp op,
+                                           const Twine &reason) {
+  std::string text = reason.str();
+  remark::missed(op->getLoc(), remark::RemarkOpts::name("vectorize")
+                                   .category("Vectorization"))
+      << remark::reason("{0}", text)
+      << remark::metric("op", op->getName().getStringRef());
+  return failure();
+}
+
 static LogicalResult vectorizeLinalgOpPrecondition(
     LinalgOp linalgOp, ArrayRef<int64_t> inputVectorSizes,
     bool vectorizeNDExtract, bool flatten1DDepthwiseConv) {
@@ -2228,17 +2244,20 @@ static LogicalResult vectorizeLinalgOpPrecondition(
   if (llvm::any_of(linalgOp->getOpOperands(), [&](OpOperand &operand) {
         return llvm::is_contained(linalgOp.getShape(&operand), 0);
       }))
-    return failure();
+    return declinedVectorization(linalgOp,
+                                 "an operand has a zero-sized dimension");
   // Check API contract for input vector sizes.
   if (!inputVectorSizes.empty() &&
       failed(vector::isValidMaskedInputVector(linalgOp.getStaticLoopRanges(),
                                               inputVectorSizes)))
-    return failure();
+    return declinedVectorization(
+        linalgOp, "requested vector sizes are invalid for the loop ranges");
 
   if (linalgOp.hasDynamicShape() && failed(vectorizeDynamicLinalgOpPrecondition(
                                         linalgOp, flatten1DDepthwiseConv))) {
     LDBG() << "Dynamically-shaped op failed vectorization pre-conditions";
-    return failure();
+    return declinedVectorization(
+        linalgOp, "dynamically-shaped op failed vectorization preconditions");
   }
 
   SmallVector<CustomVectorizationPrecondition> customPreconditions;
@@ -2258,12 +2277,13 @@ static LogicalResult vectorizeLinalgOpPrecondition(
       continue;
     }
     if (!llvm::all_of(innerOp.getOperandTypes(),
+                      VectorType::isValidElementType) ||
+        !llvm::all_of(innerOp.getResultTypes(),
                       VectorType::isValidElementType)) {
-      return failure();
-    }
-    if (!llvm::all_of(innerOp.getResultTypes(),
-                      VectorType::isValidElementType)) {
-      return failure();
+      return declinedVectorization(
+          linalgOp, "body op " + innerOp.getName().getStringRef() +
+                        " is not vectorizable (unsupported element type, and "
+                        "no custom vectorizer accepted it)");
     }
   }
   if (isElementwise(linalgOp))
@@ -2278,11 +2298,12 @@ static LogicalResult vectorizeLinalgOpPrecondition(
   // logic will need to evolve.
   if (!allIndexingsAreProjectedPermutation(linalgOp)) {
     LDBG() << "precondition failed: not projected permutations";
-    return failure();
+    return declinedVectorization(
+        linalgOp, "indexing maps are not projected permutations");
   }
   if (failed(reductionPreconditions(linalgOp))) {
     LDBG() << "precondition failed: reduction preconditions";
-    return failure();
+    return declinedVectorization(linalgOp, "reduction preconditions failed");
   }
   return success();
 }
