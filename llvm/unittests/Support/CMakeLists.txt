@@ -59,7 +59,6 @@ add_llvm_unittest(SupportTests
   KnownBitsTest.cpp
   LEB128Test.cpp
   LineIteratorTest.cpp
-  LogicalResultTest.cpp
   LockFileManagerTest.cpp
   MatchersTest.cpp
   MD5Test.cpp

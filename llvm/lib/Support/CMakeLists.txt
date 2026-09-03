@@ -222,7 +222,6 @@ add_llvm_component_library(LLVMSupport
   LineIterator.cpp
   Locale.cpp
   LockFileManager.cpp
-  LogicalResult.cpp
   ManagedStatic.cpp
   MathExtras.cpp
   MemAlloc.cpp

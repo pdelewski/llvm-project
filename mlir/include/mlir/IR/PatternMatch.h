@@ -727,45 +727,30 @@ public:
   /// reason why the failure occurred. This method allows for derived rewriters
   /// to optionally hook into the reason why a rewrite failed, and display it to
   /// users.
-  ///
-  /// The trailing location arguments default to the CALL SITE and are then
-  /// forwarded down the overload chain rather than re-defaulted. Without that
-  /// forwarding, every match failure in the tree -- 2,730 of them across MLIR
-  /// and IREE -- would report this header's line as its origin, which is worse
-  /// than recording nothing because it looks like data.
   template <typename CallbackT>
   std::enable_if_t<!std::is_convertible<CallbackT, Twine>::value, LogicalResult>
-  notifyMatchFailure(Location loc, CallbackT &&reasonCallback,
-                     const char *file = LLVM_ORIGIN_FILE,
-                     unsigned line = LLVM_ORIGIN_LINE) {
+  notifyMatchFailure(Location loc, CallbackT &&reasonCallback) {
     if (auto *rewriteListener = dyn_cast_if_present<Listener>(listener))
       rewriteListener->notifyMatchFailure(
           loc, function_ref<void(Diagnostic &)>(reasonCallback));
-    return failure(/*IsFailure=*/true, file, line);
+    return failure();
   }
   template <typename CallbackT>
   std::enable_if_t<!std::is_convertible<CallbackT, Twine>::value, LogicalResult>
-  notifyMatchFailure(Operation *op, CallbackT &&reasonCallback,
-                     const char *file = LLVM_ORIGIN_FILE,
-                     unsigned line = LLVM_ORIGIN_LINE) {
+  notifyMatchFailure(Operation *op, CallbackT &&reasonCallback) {
     if (auto *rewriteListener = dyn_cast_if_present<Listener>(listener))
       rewriteListener->notifyMatchFailure(
           op->getLoc(), function_ref<void(Diagnostic &)>(reasonCallback));
-    return failure(/*IsFailure=*/true, file, line);
+    return failure();
   }
   template <typename ArgT>
-  LogicalResult notifyMatchFailure(ArgT &&arg, const Twine &msg,
-                                   const char *file = LLVM_ORIGIN_FILE,
-                                   unsigned line = LLVM_ORIGIN_LINE) {
+  LogicalResult notifyMatchFailure(ArgT &&arg, const Twine &msg) {
     return notifyMatchFailure(std::forward<ArgT>(arg),
-                              [&](Diagnostic &diag) { diag << msg; }, file,
-                              line);
+                              [&](Diagnostic &diag) { diag << msg; });
   }
   template <typename ArgT>
-  LogicalResult notifyMatchFailure(ArgT &&arg, const char *msg,
-                                   const char *file = LLVM_ORIGIN_FILE,
-                                   unsigned line = LLVM_ORIGIN_LINE) {
-    return notifyMatchFailure(std::forward<ArgT>(arg), Twine(msg), file, line);
+  LogicalResult notifyMatchFailure(ArgT &&arg, const char *msg) {
+    return notifyMatchFailure(std::forward<ArgT>(arg), Twine(msg));
   }
 
 protected:
