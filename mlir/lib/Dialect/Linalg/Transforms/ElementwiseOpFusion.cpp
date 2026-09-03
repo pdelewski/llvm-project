@@ -2497,9 +2497,12 @@ struct FuseElementwiseThroughReshape : public OpRewritePattern<GenericOp> {
   LogicalResult matchAndRewrite(GenericOp consumer,
                                 PatternRewriter &rewriter) const override {
     if (!clFuseElementwiseThroughReshape)
-      return failure();
+      return rewriter.notifyMatchFailure(
+          consumer, "disabled: mlir-linalg-fuse-elementwise-through-reshape "
+                    "is off");
     if (!isIdentityElementwise(consumer))
-      return failure();
+      return rewriter.notifyMatchFailure(
+          consumer, "consumer is not an identity-map elementwise generic");
     // Find an input operand fed by tensor.reshape(producer).
     tensor::ReshapeOp reshapeOp;
     GenericOp producer;
