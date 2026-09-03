@@ -21,6 +21,7 @@
 
 #include "mlir/IR/Diagnostics.h"
 #include "mlir/IR/MLIRContext.h"
+#include "mlir/IR/Operation.h"
 #include "mlir/IR/Value.h"
 
 #include <atomic>
@@ -209,6 +210,14 @@ public:
   void print(llvm::raw_ostream &os, bool printLocation = false) const;
 
   Location getLocation() const { return loc; }
+
+  /// The IR operation this remark is ABOUT, when the emitter passed one.
+  /// A raw, non-owning pointer valid only during immediate emission
+  /// (RemarkEmittingPolicyAll): a buffering policy outlives the op. Streamers
+  /// that consume it must do so inside streamOptimizationRemark.
+  Operation *getSubject() const { return subject; }
+  void setSubject(Operation *op) { subject = op; }
+
   /// Diagnostic -> Remark
   llvm::remarks::Remark generateRemark() const;
 
@@ -285,6 +294,7 @@ protected:
   std::string functionName;
 
   Location loc;
+  Operation *subject = nullptr;
   /// Category name e.g., "Unroll" or "UnrollAndJam".
   /// Stored as std::string to ensure the Remark owns its data.
   std::string categoryName;
@@ -425,6 +435,12 @@ public:
   }
 
   explicit operator bool() const { return remark != nullptr; }
+
+  InFlightRemark &&withSubject(Operation *op) && {
+    if (remark)
+      remark->setSubject(op);
+    return std::move(*this);
+  }
 
   /// Get this remark's unique ID (for linking from other remarks).
   RemarkId getId() const { return remark ? remark->getId() : RemarkId(); }
@@ -723,6 +739,23 @@ inline detail::InFlightRemark failed(Location loc, RemarkOpts opts) {
 inline detail::InFlightRemark analysis(Location loc, RemarkOpts opts) {
   return withEngine(&detail::RemarkEngine::emitOptimizationRemarkAnalysis, loc,
                     opts);
+}
+
+/// Op-taking overloads: the remark is ABOUT `op` — its location is used and
+/// the op rides along as the remark's subject, so a streamer can identify
+/// the exact operation rather than re-resolving a location. See
+/// Remark::getSubject for the lifetime contract.
+inline detail::InFlightRemark passed(Operation *op, RemarkOpts opts) {
+  return passed(op->getLoc(), opts).withSubject(op);
+}
+inline detail::InFlightRemark missed(Operation *op, RemarkOpts opts) {
+  return missed(op->getLoc(), opts).withSubject(op);
+}
+inline detail::InFlightRemark failed(Operation *op, RemarkOpts opts) {
+  return failed(op->getLoc(), opts).withSubject(op);
+}
+inline detail::InFlightRemark analysis(Operation *op, RemarkOpts opts) {
+  return analysis(op->getLoc(), opts).withSubject(op);
 }
 
 //===----------------------------------------------------------------------===//
