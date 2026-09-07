@@ -58,12 +58,29 @@
 #include "llvm/ADT/DenseSet.h"
 #include "llvm/ADT/SetVector.h"
 #include "llvm/Support/DebugLog.h"
+#include "llvm/ADT/Twine.h"
 
 MLIR_DEFINE_EXPLICIT_TYPE_ID(mlir::bufferization::OneShotAnalysisState)
 
 // Run mlir-opt with `-debug-only="one-shot-analysis"` for detailed debug
 // output.
 #define DEBUG_TYPE "one-shot-analysis"
+
+/// The decision site's own address for the record, as `<path>:<line>` with
+/// the build path trimmed at the source-root marker so the same site reads
+/// the same on every machine (mlir-obs D1). Default arguments are evaluated
+/// at the CALLER: a helper that forwards its own defaulted file/line names
+/// the site that called it, an inline use names itself.
+static std::string statedSite(const char *file = __builtin_FILE(),
+                              unsigned line = __builtin_LINE()) {
+  llvm::StringRef site(file);
+  // find, not rfind: the tree can nest the marker twice, and the outer one
+  // is the path that resolves against a checkout root.
+  size_t at = site.find("/llvm-project/");
+  if (at != llvm::StringRef::npos)
+    site = site.drop_front(at + 1);
+  return (llvm::Twine(site) + ":" + llvm::Twine(line)).str();
+}
 
 using namespace mlir;
 using namespace mlir::bufferization;
@@ -1014,7 +1031,8 @@ bufferizableInPlaceAnalysisImpl(OpOperand &operand, OneShotAnalysisState &state,
                               : "operand #{0} has a read-after-write "
                                 "conflict; bufferized out of place (a copy "
                                 "is inserted)",
-                          operand.getOperandNumber());
+                          operand.getOperandNumber())
+        << remark::metric("site", statedSite());
     state.bufferizeOutOfPlace(operand);
   } else {
     state.bufferizeInPlace(operand);

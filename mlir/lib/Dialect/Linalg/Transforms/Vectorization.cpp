@@ -45,12 +45,29 @@
 #include "llvm/Support/InterleavedRange.h"
 #include "llvm/Support/MathExtras.h"
 #include "llvm/Support/raw_ostream.h"
+#include "llvm/ADT/Twine.h"
 #include <optional>
 
 using namespace mlir;
 using namespace mlir::linalg;
 
 #define DEBUG_TYPE "linalg-vectorization"
+
+/// The decision site's own address for the record, as `<path>:<line>` with
+/// the build path trimmed at the source-root marker so the same site reads
+/// the same on every machine (mlir-obs D1). Default arguments are evaluated
+/// at the CALLER: a helper that forwards its own defaulted file/line names
+/// the site that called it, an inline use names itself.
+static std::string statedSite(const char *file = __builtin_FILE(),
+                              unsigned line = __builtin_LINE()) {
+  llvm::StringRef site(file);
+  // find, not rfind: the tree can nest the marker twice, and the outer one
+  // is the path that resolves against a checkout root.
+  size_t at = site.find("/llvm-project/");
+  if (at != llvm::StringRef::npos)
+    site = site.drop_front(at + 1);
+  return (llvm::Twine(site) + ":" + llvm::Twine(line)).str();
+}
 
 /// Try to vectorize `convOp` as a convolution.
 static FailureOr<Operation *>
@@ -2228,12 +2245,15 @@ static LogicalResult vectorizeConvOpPrecondition(linalg::LinalgOp convOp) {
 /// channel that can carry the reason out. Costs a pointer check unless a
 /// remark engine is installed.
 static LogicalResult declinedVectorization(linalg::LinalgOp op,
-                                           const Twine &reason) {
+                                           const Twine &reason,
+                                           const char *file = __builtin_FILE(),
+                                           unsigned line = __builtin_LINE()) {
   std::string text = reason.str();
   remark::missed(op.getOperation(), remark::RemarkOpts::name("vectorize")
                                         .category("Vectorization"))
       << remark::reason("{0}", text)
-      << remark::metric("op", op->getName().getStringRef());
+      << remark::metric("op", op->getName().getStringRef())
+      << remark::metric("site", statedSite(file, line));
   return failure();
 }
 

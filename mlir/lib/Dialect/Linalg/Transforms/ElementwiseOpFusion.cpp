@@ -29,6 +29,7 @@
 #include "mlir/Transforms/GreedyPatternRewriteDriver.h"
 #include "mlir/Transforms/RegionUtils.h"
 #include "llvm/ADT/SmallVectorExtras.h"
+#include "llvm/ADT/Twine.h"
 #include <optional>
 #include <utility>
 
@@ -39,6 +40,22 @@ namespace mlir {
 
 using namespace mlir;
 using namespace mlir::linalg;
+
+/// The decision site's own address for the record, as `<path>:<line>` with
+/// the build path trimmed at the source-root marker so the same site reads
+/// the same on every machine (mlir-obs D1). Default arguments are evaluated
+/// at the CALLER: a helper that forwards its own defaulted file/line names
+/// the site that called it, an inline use names itself.
+static std::string statedSite(const char *file = __builtin_FILE(),
+                              unsigned line = __builtin_LINE()) {
+  llvm::StringRef site(file);
+  // find, not rfind: the tree can nest the marker twice, and the outer one
+  // is the path that resolves against a checkout root.
+  size_t at = site.find("/llvm-project/");
+  if (at != llvm::StringRef::npos)
+    site = site.drop_front(at + 1);
+  return (llvm::Twine(site) + ":" + llvm::Twine(line)).str();
+}
 
 //===---------------------------------------------------------------------===//
 // Methods and patterns that fuse elementwise `linalg.generic` operations.
@@ -499,7 +516,8 @@ public:
                          .category("Fusion"))
           << remark::reason("fused producer {0} into consumer {1}",
                             producer->getName().getStringRef(),
-                            genericOp->getName().getStringRef());
+                            genericOp->getName().getStringRef())
+          << remark::metric("site", statedSite());
 
       // Perform the fusion.
       for (auto [origVal, replacement] : fusionResult->replacements) {
