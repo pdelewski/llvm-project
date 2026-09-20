@@ -1977,10 +1977,21 @@ void OpEmitter::genAttrGetters() {
 
 void OpEmitter::genAttrSetters() {
   // Generate the code to set an attribute.
+  // Every generated setter writes the property struct directly, which is
+  // the one attribute-mutation path Operation::setInherentAttr never sees.
+  // Route it through the same observer hook (IRMutationObserver), with the
+  // old value read before the write. One branch when no observer is set.
   auto emitSetAttr = [&](Method *method, StringRef getterName,
                          StringRef attrName, StringRef attrVar) {
-    method->body() << formatv("  getProperties().{0} = {1};", attrName,
-                              attrVar);
+    method->body() << formatv(R"(
+  if (::mlir::IRMutationObserver *odsObs = ::mlir::getActiveIRMutationObserver()) {{
+    ::mlir::Attribute odsOld = getProperties().{0};
+    getProperties().{0} = {1};
+    odsObs->notifyOperationInherentAttrChanged(getOperation(), {2}AttrName(), odsOld, getProperties().{0});
+    return;
+  }
+  getProperties().{0} = {1};)",
+                              attrName, attrVar, getterName);
   };
 
   // Generate raw named setter type. This is a wrapper class that allows setting
@@ -2042,13 +2053,16 @@ void OpEmitter::genAttrSetters() {
     StringRef paramStr = isUnitAttr ? "attrValue" : "*attrValue";
     const char *optionalCodeBody = R"(
     auto &odsProp = getProperties().{0};
+    ::mlir::Attribute odsOld = odsProp;
     if (attrValue)
       odsProp = {1};
     else
-      odsProp = nullptr;)";
+      odsProp = nullptr;
+    if (::mlir::IRMutationObserver *odsObs = ::mlir::getActiveIRMutationObserver())
+      odsObs->notifyOperationInherentAttrChanged(getOperation(), {2}AttrName(), odsOld, odsProp);)";
     method->body() << formatv(
         optionalCodeBody, attrName,
-        constBuildAttrFromParam(baseAttr, fctx, paramStr));
+        constBuildAttrFromParam(baseAttr, fctx, paramStr), getterName);
   };
 
   for (const NamedAttribute &namedAttr : op.getAttributes()) {
@@ -2074,9 +2088,11 @@ void OpEmitter::genOptionalAttrRemovers() {
     method->body() << formatv(R"(
     auto attr = getProperties().{0};
     getProperties().{0} = {{};
+    if (::mlir::IRMutationObserver *odsObs = ::mlir::getActiveIRMutationObserver())
+      odsObs->notifyOperationInherentAttrChanged(getOperation(), {1}AttrName(), attr, ::mlir::Attribute());
     return attr;
 )",
-                              name);
+                              name, op.getGetterName(name));
   };
 
   for (const NamedAttribute &namedAttr : op.getAttributes())
